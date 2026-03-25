@@ -1,8 +1,16 @@
 # SubStream Protocol Backend
 
-A comprehensive backend API for the SubStream Protocol, supporting wallet-based authentication, tier-based content access, real-time analytics, and multi-region storage replication.
+A comprehensive backend API for the SubStream Protocol, supporting wallet-based authentication, tier-based content access, real-time analytics, multi-region storage replication, and **instant blockchain event synchronization**.
 
 ## Features
+
+### ⚡ Real-Time Event Listener (NEW!)
+- Instant detection of Soroban contract events (StreamCreated, StreamStopped)
+- Automatic database updates within 5 seconds of on-chain events
+- WebSocket-based real-time notifications to connected clients
+- Eliminates "sync lag" where users see locked content after payment
+- Manual force-sync endpoint for immediate verification
+- Built on Socket.IO with auto-reconnection support
 
 ### 🔐 Authentication (SIWE)
 - Wallet-based authentication using Sign In With Ethereum
@@ -16,6 +24,7 @@ A comprehensive backend API for the SubStream Protocol, supporting wallet-based 
 - Heatmap generation for content engagement
 - Server-sent events for real-time updates
 - Creator analytics dashboard
+- **WebSocket integration for instant subscription updates**
 
 ### 🌍 Multi-Region Storage
 - IPFS content replication across multiple services
@@ -65,9 +74,26 @@ npm run dev
 
 # Production
 npm start
+
+# Test event listener (verify functionality)
+npm run test:event-listener
 ```
 
 The API will be available at `http://localhost:3000`
+
+### Quick Test
+
+To verify the real-time event listener is working:
+
+```bash
+# In one terminal - start the server
+npm start
+
+# In another terminal - run the test
+npm run test:event-listener
+```
+
+You should see all tests pass ✓
 
 ## API Endpoints
 
@@ -101,8 +127,68 @@ The API will be available at `http://localhost:3000`
 ### System
 - `GET /` - API information
 - `GET /health` - Health check
+- `GET /api/websocket/stats` - WebSocket connection statistics
+- `POST /api/subscription/sync` - Manually sync subscription status
 
 ## Usage Examples
+
+### Real-Time Subscription Updates
+
+#### Frontend Integration (React)
+
+```javascript
+import { io } from 'socket.io-client';
+
+// Connect to WebSocket
+const socket = io('http://localhost:3000');
+
+socket.on('connect', () => {
+  // Subscribe to personal notifications
+  socket.emit('subscribe', { 
+    rooms: [`user:${walletAddress}`] 
+  });
+  
+  // Check current subscription status
+  socket.emit('checkSubscription', {
+    userAddress: walletAddress,
+    creatorAddress: creatorAddress,
+    contentId: videoId,
+  }, (response) => {
+    if (response.success) {
+      setIsAuthorized(response.data.isAuthorized);
+    }
+  });
+});
+
+// Listen for authorization updates
+socket.on('event', (payload) => {
+  if (payload.type === 'AUTHORIZATION_UPDATED') {
+    setIsAuthorized(payload.data.isAuthorized);
+    // Content unlocks instantly!
+  }
+});
+```
+
+#### Manual Sync After Payment
+
+```javascript
+// Immediately sync after on-chain payment
+const response = await fetch('/api/subscription/sync', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    userAddress: user.address,
+    creatorAddress: creator.address,
+    contentId: video.id,
+  }),
+});
+
+const { data } = await response.json();
+if (data.isAuthorized) {
+  // Grant access immediately
+  setAccessGranted(true);
+}
+```
 
 ### Authentication
 ```javascript
@@ -158,6 +244,24 @@ const heatmapResponse = await fetch('/analytics/heatmap/video_001', {
 
 ## Architecture
 
+### Real-Time Event Flow
+
+```
+User Pays on Chain
+    ↓
+Soroban Contract Emits Event
+    ↓
+Event Listener Detects (within 5 seconds)
+    ↓
+Updates Database (is_authorized = true)
+    ↓
+Broadcasts via WebSocket
+    ↓
+Frontend Receives Update
+    ↓
+UI Instantly Unlocks Content ✓
+```
+
 ### Services
 - **AuthService**: Handles SIWE authentication and JWT management
 - **ContentService**: Manages content with tier-based filtering
@@ -176,10 +280,33 @@ const heatmapResponse = await fetch('/analytics/heatmap/video_001', {
 4. Content filtered based on user tier
 5. Analytics events tracked in real-time
 6. Content replicated across multiple regions
+7. **Blockchain events detected automatically**
+8. **Authorization updated in real-time**
+9. **WebSocket notifications sent to clients**
+
+### Component Overview
+
+- **SorobanEventListener**: Polls blockchain for contract events
+- **WebSocketServer**: Broadcasts events to connected clients
+- **AppDatabase**: Stores subscription state with `is_authorized` flag
+- **Express API**: Provides endpoints for manual sync and stats
 
 ## Environment Variables
 
 See `.env.example` for all available configuration options.
+
+## Documentation
+
+### Core Documentation
+- **[Quick Start Guide](docs/QUICKSTART_REALTIME_EVENTS.md)** - Get started in 5 minutes
+- **[Full Technical Docs](docs/REAL_TIME_EVENT_LISTENER.md)** - Complete API reference
+- **[Architecture Diagrams](docs/ARCHITECTURE_DIAGRAMS.md)** - Visual system design
+- **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - What was built
+
+### Examples
+- **[Test Suite](examples/test-event-listener.js)** - Automated tests
+- **[WebSocket Client](examples/websocket-client-example.js)** - Interactive demo
+- **[Examples README](examples/README.md)** - How to use examples
 
 ## Development
 

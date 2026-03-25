@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const http = require('http');
+
 dotenv.config();
 
 const { AppDatabase } = require('./src/db/appDatabase');
@@ -10,6 +12,8 @@ const { CreatorActionService } = require('./src/services/creatorActionService');
 const { CreatorAuditLogService } = require('./src/services/creatorAuditLogService');
 const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
+const { SorobanEventListener, EventNames } = require('./src/services/sorobanEventListener');
+const { WebSocketServer } = require('./src/services/webSocketServer');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
@@ -31,6 +35,24 @@ function createApp(dependencies = {}) {
   const subscriptionVerifier =
     dependencies.subscriptionVerifier || new SorobanSubscriptionVerifier(config);
   const tokenService = dependencies.tokenService || new CdnTokenService(config);
+  const eventListener = dependencies.eventListener || new SorobanEventListener(config, database);
+  const webSocketServer = dependencies.webSocketServer || new WebSocketServer(null, eventListener, database);
+
+  // Create HTTP server wrapper for Express app
+  const httpServer = dependencies.httpServer || http.createServer(app);
+  
+  // Initialize WebSocket server with HTTP server
+  if (!dependencies.webSocketServer) {
+    webSocketServer.httpServer = httpServer;
+    webSocketServer.init();
+  }
+
+  // Start Soroban event listener (if not in test mode)
+  if (process.env.ENABLE_SOROBAN_EVENT_LISTENER !== 'false' && !dependencies.eventListener) {
+    eventListener.start().catch((error) => {
+      console.error('[Index] Failed to start Soroban event listener:', error);
+    });
+  }
 
   app.use(cors());
   app.use(express.json());
@@ -238,6 +260,61 @@ function createApp(dependencies = {}) {
     return res.status(200).send(pdf);
   });
 
+  // WebSocket stats endpoint
+  app.get('/api/websocket/stats', (req, res) => {
+    try {
+      const stats = webSocketServer.getStats();
+      return res.status(200).json({
+        success: true,
+        data: stats,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to get WebSocket stats',
+      });
+    }
+  });
+
+  // Manual subscription sync endpoint (for immediate verification after payment)
+  app.post('/api/subscription/sync', async (req, res) => {
+    try {
+      const { userAddress, creatorAddress, contentId } = req.body;
+
+      if (!userAddress || !creatorAddress || !contentId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required fields: userAddress, creatorAddress, contentId',
+        });
+      }
+
+      // Force sync with blockchain
+      const isAuthorized = await eventListener.forceSyncSubscription(
+        userAddress,
+        creatorAddress,
+        contentId
+      );
+
+      // Get updated subscription from database
+      const subscription = database.getUserSubscription(userAddress, creatorAddress, contentId);
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          isAuthorized,
+          subscription: subscription || null,
+          syncedAt: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error('[Index] Subscription sync failed:', error);
+      return res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to sync subscription',
+      });
+    }
+  });
+
   app.use((req, res) => res.status(404).json({ success: false, error: 'Not found' }));
 
   return app;
@@ -315,12 +392,19 @@ function handleActionError(res, error) {
     .json({ success: false, error: error.message || 'Request failed' });
 }
 
+module.exports = app;
+module.exports.createApp = createApp;
+
+// Start the server only if this file is run directly
 const app = createApp();
 const port = Number(process.env.PORT || 3000);
 
 if (require.main === module) {
-  app.listen(port, () => console.log(`SubStream API running on port ${port}`));
+  const httpServer = http.createServer(app);
+  
+  httpServer.listen(port, () => {
+    console.log(`SubStream API running on port ${port}`);
+    console.log(`WebSocket server ready for real-time events`);
+    console.log(`Soroban event listener: ${process.env.ENABLE_SOROBAN_EVENT_LISTENER !== 'false' ? 'enabled' : 'disabled'}`);
+  });
 }
-
-module.exports = app;
-module.exports.createApp = createApp;

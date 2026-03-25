@@ -94,6 +94,27 @@ class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments (post_id);
       CREATE INDEX IF NOT EXISTS idx_comments_creator_id ON comments (creator_id);
       CREATE INDEX IF NOT EXISTS idx_comments_user_address ON comments (user_address);
+
+      CREATE TABLE IF NOT EXISTS user_subscriptions (
+        id TEXT PRIMARY KEY,
+        user_address TEXT NOT NULL,
+        creator_address TEXT NOT NULL,
+        content_id TEXT NOT NULL,
+        is_authorized INTEGER NOT NULL DEFAULT 0,
+        subscription_type TEXT,
+        started_at TEXT,
+        ended_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_synced_block INTEGER,
+        metadata_json TEXT
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_user_subscriptions_unique 
+      ON user_subscriptions (user_address, creator_address, content_id);
+      CREATE INDEX IF NOT EXISTS idx_user_subscriptions_user ON user_subscriptions (user_address);
+      CREATE INDEX IF NOT EXISTS idx_user_subscriptions_creator ON user_subscriptions (creator_address);
+      CREATE INDEX IF NOT EXISTS idx_user_subscriptions_authorized ON user_subscriptions (is_authorized);
     `);
   }
 
@@ -519,6 +540,222 @@ class AppDatabase {
       .run(commentId);
 
     return result.changes > 0;
+  }
+
+  /**
+   * Insert or update a user subscription record.
+   *
+   * @param {{userAddress: string, creatorAddress: string, contentId: string, isAuthorized: boolean, subscriptionType?: string, startedAt?: string, endedAt?: string, lastSyncedBlock?: number, metadata?: object}} subscription Subscription data.
+   * @returns {object}
+   */
+  upsertUserSubscription(subscription) {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    
+    this.db
+      .prepare(
+        `
+        INSERT INTO user_subscriptions (
+          id,
+          user_address,
+          creator_address,
+          content_id,
+          is_authorized,
+          subscription_type,
+          started_at,
+          ended_at,
+          created_at,
+          updated_at,
+          last_synced_block,
+          metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_address, creator_address, content_id) DO UPDATE SET
+          is_authorized = excluded.is_authorized,
+          subscription_type = excluded.subscription_type,
+          started_at = excluded.started_at,
+          ended_at = excluded.ended_at,
+          updated_at = excluded.updated_at,
+          last_synced_block = excluded.last_synced_block,
+          metadata_json = excluded.metadata_json
+      `,
+      )
+      .run(
+        id,
+        subscription.userAddress,
+        subscription.creatorAddress,
+        subscription.contentId,
+        subscription.isAuthorized ? 1 : 0,
+        subscription.subscriptionType || null,
+        subscription.startedAt || null,
+        subscription.endedAt || null,
+        now,
+        now,
+        subscription.lastSyncedBlock || null,
+        subscription.metadata ? JSON.stringify(subscription.metadata) : null,
+      );
+
+    return this.getUserSubscription(subscription.userAddress, subscription.creatorAddress, subscription.contentId);
+  }
+
+  /**
+   * Get a user subscription by addresses and content ID.
+   *
+   * @param {string} userAddress User wallet address.
+   * @param {string} creatorAddress Creator wallet address.
+   * @param {string} contentId Content identifier.
+   * @returns {object|null}
+   */
+  getUserSubscription(userAddress, creatorAddress, contentId) {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          id,
+          user_address AS userAddress,
+          creator_address AS creatorAddress,
+          content_id AS contentId,
+          is_authorized AS isAuthorized,
+          subscription_type AS subscriptionType,
+          started_at AS startedAt,
+          ended_at AS endedAt,
+          created_at AS createdAt,
+          updated_at AS updatedAt,
+          last_synced_block AS lastSyncedBlock,
+          metadata_json AS metadataJson
+        FROM user_subscriptions
+        WHERE user_address = ? AND creator_address = ? AND content_id = ?
+      `,
+      )
+      .get(userAddress, creatorAddress, contentId);
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      ...row,
+      isAuthorized: row.isAuthorized === 1,
+      metadata: row.metadataJson ? JSON.parse(row.metadataJson) : null,
+    };
+  }
+
+  /**
+   * Update user authorization status.
+   *
+   * @param {string} userAddress User wallet address.
+   * @param {string} creatorAddress Creator wallet address.
+   * @param {string} contentId Content identifier.
+   * @param {boolean} isAuthorized Authorization status.
+   * @param {object} [metadata] Optional metadata to update.
+   * @returns {object|null}
+   */
+  updateUserAuthorization(userAddress, creatorAddress, contentId, isAuthorized, metadata = null) {
+    const now = new Date().toISOString();
+    
+    this.db
+      .prepare(
+        `
+        UPDATE user_subscriptions
+        SET is_authorized = ?, updated_at = ?, metadata_json = ?
+        WHERE user_address = ? AND creator_address = ? AND content_id = ?
+      `,
+      )
+      .run(isAuthorized ? 1 : 0, now, metadata ? JSON.stringify(metadata) : null, userAddress, creatorAddress, contentId);
+
+    return this.getUserSubscription(userAddress, creatorAddress, contentId);
+  }
+
+  /**
+   * Get all active subscriptions for a user.
+   *
+   * @param {string} userAddress User wallet address.
+   * @returns {object[]}
+   */
+  getActiveSubscriptionsForUser(userAddress) {
+    return this.db
+      .prepare(
+        `
+        SELECT
+          id,
+          user_address AS userAddress,
+          creator_address AS creatorAddress,
+          content_id AS contentId,
+          is_authorized AS isAuthorized,
+          subscription_type AS subscriptionType,
+          started_at AS startedAt,
+          ended_at AS endedAt,
+          created_at AS createdAt,
+          updated_at AS updatedAt,
+          last_synced_block AS lastSyncedBlock,
+          metadata_json AS metadataJson
+        FROM user_subscriptions
+        WHERE user_address = ? AND is_authorized = 1
+        ORDER BY updated_at DESC
+      `,
+      )
+      .all(userAddress)
+      .map(row => ({
+        ...row,
+        isAuthorized: row.isAuthorized === 1,
+        metadata: row.metadataJson ? JSON.parse(row.metadataJson) : null,
+      }));
+  }
+
+  /**
+   * Get all subscribers for a creator.
+   *
+   * @param {string} creatorAddress Creator wallet address.
+   * @param {string} [contentId] Optional content ID filter.
+   * @returns {object[]}
+   */
+  getSubscribersForCreator(creatorAddress, contentId = null) {
+    const query = contentId
+      ? `
+        SELECT
+          id,
+          user_address AS userAddress,
+          creator_address AS creatorAddress,
+          content_id AS contentId,
+          is_authorized AS isAuthorized,
+          subscription_type AS subscriptionType,
+          started_at AS startedAt,
+          ended_at AS endedAt,
+          created_at AS createdAt,
+          updated_at AS updatedAt,
+          last_synced_block AS lastSyncedBlock,
+          metadata_json AS metadataJson
+        FROM user_subscriptions
+        WHERE creator_address = ? AND content_id = ? AND is_authorized = 1
+        ORDER BY started_at DESC
+      `
+      : `
+        SELECT
+          id,
+          user_address AS userAddress,
+          creator_address AS creatorAddress,
+          content_id AS contentId,
+          is_authorized AS isAuthorized,
+          subscription_type AS subscriptionType,
+          started_at AS startedAt,
+          ended_at AS endedAt,
+          created_at AS createdAt,
+          updated_at AS updatedAt,
+          last_synced_block AS lastSyncedBlock,
+          metadata_json AS metadataJson
+        FROM user_subscriptions
+        WHERE creator_address = ? AND is_authorized = 1
+        ORDER BY started_at DESC
+      `;
+
+    return this.db
+      .prepare(query)
+      .all(contentId ? [creatorAddress, contentId] : [creatorAddress])
+      .map(row => ({
+        ...row,
+        isAuthorized: row.isAuthorized === 1,
+        metadata: row.metadataJson ? JSON.parse(row.metadataJson) : null,
+      }));
   }
 }
 

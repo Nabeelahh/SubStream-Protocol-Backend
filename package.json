@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "jest"
+    "test": "jest",
+    "test:event-listener": "node examples/test-event-listener.js",
+    "example:websocket-client": "node examples/websocket-client-example.js"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.1",
@@ -19,6 +21,7 @@
     "ipfs-http-client": "^60.0.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.7.2",
     "stellar-sdk": "^13.3.0",
     "web3.storage": "^4.5.4"
   },
